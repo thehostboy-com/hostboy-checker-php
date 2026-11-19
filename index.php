@@ -19,13 +19,26 @@ $configDefaults = [
     'mode' => 'form', 'cooldownSeconds' => 60, 'reportUrl' => '', 'checkerKey' => '',
     'provider' => 'Hosting provider', 'plan' => 'Plan', 'region' => 'Not disclosed',
     'configuration' => 'PHP web runtime', 'brand' => 'TheHostBoy',
+    'mysql' => ['enabled' => false, 'host' => '', 'port' => 3306, 'database' => '', 'username' => '', 'password' => '', 'connectTimeoutSeconds' => 5, 'readTimeoutSeconds' => 5],
 ];
 if (!is_array($config)) $config = [];
 $config = array_merge($configDefaults, $config);
+$mysqlConfig = is_array($config['mysql']) ? array_merge($configDefaults['mysql'], $config['mysql']) : null;
 $endpoint = parse_url((string) $config['reportUrl']);
 if (!in_array($config['mode'], ['form', 'auto'], true) || !is_int($config['cooldownSeconds']) || $config['cooldownSeconds'] < 60 || $config['cooldownSeconds'] > 86400 ||
     !is_array($endpoint) || ($endpoint['scheme'] ?? '') !== 'https' || empty($endpoint['host']) || isset($endpoint['user']) || isset($endpoint['pass']) || isset($endpoint['fragment']) ||
-    !is_string($config['checkerKey']) || strlen($config['checkerKey']) < 32) {
+    !is_string($config['checkerKey']) || strlen($config['checkerKey']) < 32 || $mysqlConfig === null || !is_bool($mysqlConfig['enabled'])) {
+    http_response_code(503);
+    exit('Checker configuration is invalid.');
+}
+if ($mysqlConfig['enabled'] &&
+    (!is_string($mysqlConfig['host']) || $mysqlConfig['host'] === '' || strlen($mysqlConfig['host']) > 253 || !preg_match('/^[A-Za-z0-9.-]+$/', $mysqlConfig['host']) ||
+        !is_string($mysqlConfig['database']) || $mysqlConfig['database'] === '' || strlen($mysqlConfig['database']) > 64 ||
+        !is_string($mysqlConfig['username']) || $mysqlConfig['username'] === '' || strlen($mysqlConfig['username']) > 64 ||
+        !is_string($mysqlConfig['password']) || $mysqlConfig['password'] === '' || strlen($mysqlConfig['password']) > 255 ||
+        !is_int($mysqlConfig['port']) || $mysqlConfig['port'] < 1 || $mysqlConfig['port'] > 65535 ||
+        !is_int($mysqlConfig['connectTimeoutSeconds']) || $mysqlConfig['connectTimeoutSeconds'] < 1 || $mysqlConfig['connectTimeoutSeconds'] > 15 ||
+        !is_int($mysqlConfig['readTimeoutSeconds']) || $mysqlConfig['readTimeoutSeconds'] < 1 || $mysqlConfig['readTimeoutSeconds'] > 15)) {
     http_response_code(503);
     exit('Checker configuration is invalid.');
 }
@@ -72,6 +85,37 @@ function memoryLimitBytes(): ?int
     return (int) $parts[1] * ['' => 1, 'K' => 1024, 'M' => 1048576, 'G' => 1073741824][strtoupper($parts[2])];
 }
 
+function mysqlCheck(array $settings): array
+{
+    if (!$settings['enabled']) return ['mysqlStatus' => 'disabled', 'mysqlQueryMs' => null];
+    if (!extension_loaded('mysqli')) return ['mysqlStatus' => 'unavailable', 'mysqlQueryMs' => null];
+
+    $started = hrtime(true);
+    $connection = null;
+    try {
+        mysqli_report(MYSQLI_REPORT_OFF);
+        $connection = mysqli_init();
+        if ($connection === false) throw new RuntimeException('MySQL client unavailable');
+        if (!$connection->options(MYSQLI_OPT_CONNECT_TIMEOUT, $settings['connectTimeoutSeconds']) ||
+            !$connection->options(MYSQLI_OPT_READ_TIMEOUT, $settings['readTimeoutSeconds'])) {
+            throw new RuntimeException('MySQL timeouts unavailable');
+        }
+        if (!$connection->real_connect($settings['host'], $settings['username'], $settings['password'], $settings['database'], $settings['port'])) {
+            throw new RuntimeException('MySQL connection failed');
+        }
+        $result = $connection->query('SELECT 1');
+        if ($result === false) throw new RuntimeException('MySQL probe failed');
+        $row = $result->fetch_row();
+        $result->free();
+        if (!is_array($row) || (string) ($row[0] ?? '') !== '1') throw new RuntimeException('MySQL probe failed');
+        return ['mysqlStatus' => 'connected', 'mysqlQueryMs' => (hrtime(true) - $started) / 1000000];
+    } catch (Throwable $error) {
+        return ['mysqlStatus' => 'failed', 'mysqlQueryMs' => (hrtime(true) - $started) / 1000000];
+    } finally {
+        if ($connection instanceof mysqli) $connection->close();
+    }
+}
+
 if ($shouldRun) {
     $lock = @fopen($lockPath, 'c+');
     if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
@@ -100,12 +144,14 @@ if ($shouldRun) {
                         if (@file_put_contents($tmpFile, $block) === strlen($block) && @file_get_contents($tmpFile) !== false) $diskMs = (hrtime(true) - $start) / 1000000;
                     } finally { @unlink($tmpFile); }
                 }
+                $mysqlMetrics = mysqlCheck($mysqlConfig);
                 $requestId = bin2hex(random_bytes(16));
                 $payload = json_encode([
                     'runtime' => 'php', 'schemaVersion' => 1,
                     'version' => PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . '.' . PHP_RELEASE_VERSION,
                     'suite' => 'hostboy-v1', 'requestId' => $requestId, 'hashMs' => $hashMs,
                     'diskMs' => $diskMs, 'memoryLimitBytes' => memoryLimitBytes(), 'availableParallelism' => null,
+                    'mysqlStatus' => $mysqlMetrics['mysqlStatus'], 'mysqlQueryMs' => $mysqlMetrics['mysqlQueryMs'],
                 ], JSON_THROW_ON_ERROR);
                 $context = stream_context_create(['http' => [
                     'method' => 'POST',
@@ -123,7 +169,7 @@ if ($shouldRun) {
                     usleep((int) (250000 * (2 ** $attempt)));
                 }
                 $runMetrics = ['phpVersion' => PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . '.' . PHP_RELEASE_VERSION, 'hashMs' => $hashMs,
-                    'diskMs' => $diskMs, 'memoryLimitBytes' => memoryLimitBytes()];
+                    'diskMs' => $diskMs, 'memoryLimitBytes' => memoryLimitBytes()] + $mysqlMetrics;
                 $state = ['startedAt' => time(), 'status' => $accepted ? 'accepted' : 'rejected', 'metrics' => $runMetrics];
                 $message = $accepted ? 'Check complete. TheHostBoy accepted the report.' : 'The check ran, but the report was not accepted.';
             } catch (Throwable $error) {
@@ -152,6 +198,7 @@ $lastMetrics = is_array($state['metrics'] ?? null) ? $state['metrics'] : null;
 <?php if ($message !== ''): ?><p class="message" role="status"><?= $escape($message) ?></p><?php endif; ?>
 <?php if ($lastTimestamp > 0): ?><h2>Latest check</h2><p><strong><?= $escape(ucfirst((string) ($state['status'] ?? 'unknown'))) ?></strong> · <?= $escape(gmdate('Y-m-d H:i:s', $lastTimestamp)) ?> UTC</p>
 <?php if ($lastMetrics): ?><div class="grid"><div class="metric"><strong><?= $escape(number_format((float) $lastMetrics['hashMs'], 2)) ?> ms</strong><small>SHA-256 sample</small></div><div class="metric"><strong><?= isset($lastMetrics['diskMs']) ? $escape(number_format((float) $lastMetrics['diskMs'], 2)) . ' ms' : 'Unavailable' ?></strong><small>Temporary file read/write</small></div><div class="metric"><strong><?= isset($lastMetrics['memoryLimitBytes']) ? $escape(number_format((float) $lastMetrics['memoryLimitBytes'] / 1048576, 0)) . ' MiB' : 'Unknown' ?></strong><small>PHP memory limit</small></div><div class="metric"><strong>PHP <?= $escape($lastMetrics['phpVersion'] ?? 'Unknown') ?></strong><small>Runtime version</small></div></div><?php endif; ?>
+<?php if (isset($lastMetrics['mysqlStatus'])): ?><div class="grid"><div class="metric"><strong><?= $escape(ucfirst((string) $lastMetrics['mysqlStatus'])) ?></strong><small>MySQL connectivity check</small></div><div class="metric"><strong><?= isset($lastMetrics['mysqlQueryMs']) ? $escape(number_format((float) $lastMetrics['mysqlQueryMs'], 2)) . ' ms' : 'Unavailable' ?></strong><small>Connect and SELECT 1</small></div></div><?php endif; ?>
 <?php else: ?><p class="muted">No checks have run yet.</p><?php endif; ?>
 <?php if ($config['mode'] === 'form'): ?><form method="post"><button class="run" type="submit">Run a fresh check</button></form><?php elseif ($config['mode'] === 'auto'): ?><p class="muted">This page runs a check on load, subject to the configured cooldown.</p><?php endif; ?>
 <p class="foot">One check per installation every <?= $escape($config['cooldownSeconds']) ?> seconds. Measurements are point-in-time samples, not an uptime guarantee. <a href="https://thehostboy.com/">Back to TheHostBoy</a></p>

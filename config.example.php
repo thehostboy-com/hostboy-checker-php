@@ -17,4 +17,14 @@ return [
     'region' => 'Not disclosed',
     'configuration' => 'InfinityFree free account; PHP web runtime; manually triggered',
     'brand' => 'TheHostBoy',
+    'mysql' => [
+        'enabled' => false,
+        'host' => '',
+        'port' => 3306,
+        'database' => '',
+        'username' => '',
+        'password' => '',
+        'connectTimeoutSeconds' => 5,
+        'readTimeoutSeconds' => 5,
+    ],
 ];
