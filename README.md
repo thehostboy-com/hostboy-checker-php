@@ -24,3 +24,11 @@ The report URL and key are provided by TheHostBoy. Keep the key private; it allo
 The script sends a report at most once per run, retries bounded transient failures, times out requests, and does not follow redirects. It performs local CPU and temporary-storage work; it does not scan site files or collect visitor data.
 
 The default endpoint for a user-contributed installation is `/api/v1/community/reports`. Provider-authorized installations use the exact report URL supplied by an administrator. Community results are labeled self-reported and kept out of provider plan rankings.
+
+## Shared-host web checker
+
+`index.php` adds a branded, user-initiated web check for PHP shared hosting without CLI or cron. Copy `index.php` into the site root and the configured `config.php` into `.hostboy-private/`. Keep that directory protected by the supplied deny-all `.htaccess` file. The config returns 404 if requested directly and is loaded only by `index.php`.
+
+Set `mode` to `form` to show a Run a fresh check button, or `auto` to run on page load. The shared installation cooldown defaults to 60 seconds and cannot be configured below 60 seconds. The page shows the last run and its PHP version, hash timing, temporary-file timing, and memory limit. Every accepted sample is sent to `reportUrl` using `checkerKey`; the key is never sent to the browser. The `.hostboy-private` directory must contain the supplied deny-all `.htaccess` file because it stores the last-run state and lock.
+
+The CLI checker remains available as `hostboy-checker.php`. Across the Node, Python, shell, and PHP CLI repos, configuration uses the same `HOSTBOY_REPORT_URL` and `HOSTBOY_CHECKER_KEY` environment variables; the web page uses the equivalent keys in its private PHP config.

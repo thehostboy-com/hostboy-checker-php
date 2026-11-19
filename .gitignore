@@ -2,3 +2,7 @@
 .env.*
 !.env.example
 *.log
+/config.php
+/.hostboy-private/config.php
+/.hostboy-private/index-state.json
+/.hostboy-private/index-run.lock
